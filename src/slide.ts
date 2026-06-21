@@ -2,7 +2,7 @@
  * PptxGenJS: Slide Class
  */
 
-import { CHART_NAME, SHAPE_NAME } from './core-enums'
+import { CHART_NAME, SHAPE_NAME, SLIDE_OBJECT_TYPES } from './core-enums'
 import {
 	AddSlideProps,
 	BackgroundProps,
@@ -217,6 +217,30 @@ export default class Slide {
 		// TypeScript => `pptxgen.shapes.RECTANGLE` [string] "rect" ... shapeName = 'rect'
 		// let shapeNameDecode = typeof shapeName === 'object' && shapeName['name'] ? shapeName['name'] : shapeName
 		genObj.addShapeDefinition(this, shapeName, options)
+		return this
+	}
+
+	/**
+	 * Group objects added by `build` into a single native `<p:grpSp>`.
+	 * Any objects added to the slide during the `build` callback (addShape,
+	 * addText, addImage, …) are collected and wrapped in one group; children
+	 * keep their absolute slide coordinates. Moving/resizing the group in
+	 * PowerPoint/Google Slides tracks all members together.
+	 * @param {(slide: Slide) => void} build - callback that adds the group's children
+	 * @param {{ objectName?: string }} [options] - group object name
+	 * @return {Slide} this Slide
+	 */
+	addGroup(build: (slide: Slide) => void, options?: { objectName?: string }): Slide {
+		const start = this._slideObjects.length
+		build(this)
+		const children: ISlideObject[] = this._slideObjects.splice(start)
+		if (children.length > 0) {
+			this._slideObjects.push({
+				_type: SLIDE_OBJECT_TYPES.group,
+				options: { objectName: options?.objectName },
+				_group: children,
+			})
+		}
 		return this
 	}
 

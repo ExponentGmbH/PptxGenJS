@@ -191,13 +191,25 @@ export interface ShapeFillProps {
 	 * Fill type
 	 * @default 'solid'
 	 */
-	type?: 'none' | 'solid'
+	type?: 'none' | 'solid' | 'gradient'
 
 	/**
 	 * Transparency (percent)
 	 * @deprecated v3.3.0 - use `transparency`
 	 */
 	alpha?: number
+
+	/**
+	 * Gradient fill spec (when `type: 'gradient'`).
+	 * - `stops[].color` must be a 6-hex string (no leading '#')
+	 * - `angle` is the CSS gradient angle in degrees (0=up, clockwise); ignored for radial
+	 * - `type: 'radial'` emits a concentric circle gradient; otherwise linear
+	 */
+	gradient?: {
+		angle?: number
+		type?: 'linear' | 'radial' | string
+		stops: Array<{ color: string, position: number, alpha?: number }>
+	}
 }
 export interface ShapeLineProps extends ShapeFillProps {
 	/**
@@ -205,6 +217,13 @@ export interface ShapeLineProps extends ShapeFillProps {
 	 * @default 1
 	 */
 	width?: number
+	/**
+	 * Stroke alignment relative to the geometry path.
+	 * - `in` draws the stroke fully inside the shape (matches CSS borders)
+	 * - `ctr` straddles the path (OOXML default when omitted)
+	 * - `out` draws fully outside
+	 */
+	align?: 'in' | 'ctr' | 'out'
 	/**
 	 * Dash type
 	 * @default 'solid'
@@ -1680,6 +1699,8 @@ export interface ISlideObject {
 	mtype?: MediaType
 	mediaRid?: number
 	shape?: SHAPE_NAME
+	// group: child objects emitted inside a single <p:grpSp> (children keep absolute coords)
+	_group?: ISlideObject[]
 }
 // PRIVATE ^^^
 

@@ -103,7 +103,11 @@ function slideObjectToXml (slide: PresSlide | SlideLayout): string {
 	strSlideXml += '<a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>'
 
 	// STEP 3: Loop over all Slide.data objects and add them to this slide
-	slide._slideObjects.forEach((slideItemObj: ISlideObject, idx: number) => {
+	// Per-object spTree emission, extracted into a closure so a group object can
+	// recurse over its children (shares `intTableNum` via closure). The local
+	// `strSlideXml` shadows the outer accumulator; callers append the return value.
+	const genObjectXml = (slideItemObj: ISlideObject, idx: number): string => {
+		let strSlideXml = ''
 		let x = 0
 		let y = 0
 		let cx = getSmartParseNumber('75%', 'X', slide._presLayout)
@@ -358,7 +362,11 @@ function slideObjectToXml (slide: PresSlide | SlideLayout): string {
 									}"/><a:round/><a:headEnd type="none" w="med" len="med"/><a:tailEnd type="none" w="med" len="med"/>`
 									strXml += `</a:${obj.name}>`
 								} else {
-									strXml += `<a:${obj.name} w="0" cap="flat" cmpd="sng" algn="ctr"><a:noFill/></a:${obj.name}>`
+									// Explicit "no border": emit the MINIMAL noFill form. The verbose
+									// w="0" cap="flat" cmpd="sng" algn="ctr" variant is misread by Google
+									// Slides as a default ~1pt hairline, painting cell dividers the CSS
+									// never specified.
+									strXml += `<a:${obj.name}><a:noFill/></a:${obj.name}>`
 								}
 							})
 						}
@@ -487,7 +495,15 @@ function slideObjectToXml (slide: PresSlide | SlideLayout): string {
 				} else {
 					strSlideXml += '<a:prstGeom prst="' + slideItemObj.shape + '"><a:avLst>'
 					if (slideItemObj.options.rectRadius) {
-						strSlideXml += `<a:gd name="adj" fmla="val ${Math.round((slideItemObj.options.rectRadius * EMU * 100000) / Math.min(cx, cy))}"/>`
+						const _adjVal = Math.round((slideItemObj.options.rectRadius * EMU * 100000) / Math.min(cx, cy))
+						if (slideItemObj.shape === 'round2SameRect') {
+							// round2SameRect exposes TWO adjust handles: adj1 (the rounded corner pair) and
+							// adj2 (the flat pair). A single name="adj" override is ignored, so the renderer
+							// falls back to the preset default adj1=16.667% and over-rounds. Name them correctly.
+							strSlideXml += `<a:gd name="adj1" fmla="val ${_adjVal}"/><a:gd name="adj2" fmla="val 0"/>`
+						} else {
+							strSlideXml += `<a:gd name="adj" fmla="val ${_adjVal}"/>`
+						}
 					} else if (slideItemObj.options.angleRange) {
 						for (let i = 0; i < 2; i++) {
 							const angle = slideItemObj.options.angleRange[i]
@@ -506,11 +522,21 @@ function slideObjectToXml (slide: PresSlide | SlideLayout): string {
 
 				// shape Type: LINE: line color
 				if (slideItemObj.options.line) {
-					strSlideXml += slideItemObj.options.line.width ? `<a:ln w="${valToPts(slideItemObj.options.line.width)}">` : '<a:ln>'
-					if (slideItemObj.options.line.color) strSlideXml += genXmlColorSelection(slideItemObj.options.line)
-					if (slideItemObj.options.line.dashType) strSlideXml += `<a:prstDash val="${slideItemObj.options.line.dashType}"/>`
-					if (slideItemObj.options.line.beginArrowType) strSlideXml += `<a:headEnd type="${slideItemObj.options.line.beginArrowType}"/>`
-					if (slideItemObj.options.line.endArrowType) strSlideXml += `<a:tailEnd type="${slideItemObj.options.line.endArrowType}"/>`
+					const _lnOpts = slideItemObj.options.line
+					// `align` ('in'|'ctr'|'out') controls stroke alignment to the geometry path. CSS borders
+					// draw fully INSIDE the box, so width-bearing lines default to 'in' (matches HTML); an
+					// explicit `align` overrides. Width-less lines (e.g. type:'none') carry no algn.
+					const _lnAlgn = _lnOpts.align ?? (_lnOpts.width ? 'in' : undefined)
+					const _lnAlgnAttr = _lnAlgn ? ` algn="${_lnAlgn}"` : ''
+					const _lnHasChild = Boolean(_lnOpts.color) || _lnOpts.type === 'none' || Boolean(_lnOpts.dashType) || Boolean(_lnOpts.beginArrowType) || Boolean(_lnOpts.endArrowType)
+					strSlideXml += _lnOpts.width ? `<a:ln w="${valToPts(_lnOpts.width)}"${_lnAlgnAttr}>` : `<a:ln${_lnAlgnAttr}>`
+					// `type: 'none'` is an EXPLICIT "no stroke" — emit <a:noFill/> so Slides/PPT don't fall back
+					// to a default ~1pt theme line on a bare <a:ln>. (Also covers an otherwise-empty <a:ln>.)
+					if (_lnOpts.type === 'none' || (!_lnOpts.width && !_lnHasChild)) strSlideXml += '<a:noFill/>'
+					else if (_lnOpts.color) strSlideXml += genXmlColorSelection(_lnOpts)
+					if (_lnOpts.dashType) strSlideXml += `<a:prstDash val="${_lnOpts.dashType}"/>`
+					if (_lnOpts.beginArrowType) strSlideXml += `<a:headEnd type="${_lnOpts.beginArrowType}"/>`
+					if (_lnOpts.endArrowType) strSlideXml += `<a:tailEnd type="${_lnOpts.endArrowType}"/>`
 					// FUTURE: `endArrowSize` < a: headEnd type = "arrow" w = "lg" len = "lg" /> 'sm' | 'med' | 'lg'(values are 1 - 9, making a 3x3 grid of w / len possibilities)
 					strSlideXml += '</a:ln>'
 				}
@@ -689,11 +715,43 @@ function slideObjectToXml (slide: PresSlide | SlideLayout): string {
 				strSlideXml += '</p:graphicFrame>'
 				break
 
+			case SLIDE_OBJECT_TYPES.group: {
+				// Native shape group: <p:grpSp> wrapping child objects. Children keep absolute
+				// slide coords, so chOff/chExt mirror off/ext (no remap). Recurse via genObjectXml.
+				const _kids = slideItemObj._group || []
+				if (_kids.length === 0) break
+				let _childXml = ''
+				let _gMinX = Number.POSITIVE_INFINITY; let _gMinY = Number.POSITIVE_INFINITY
+				let _gMaxX = Number.NEGATIVE_INFINITY; let _gMaxY = Number.NEGATIVE_INFINITY
+				_kids.forEach((kid, kidx) => {
+					// High id base so child ids never collide with top-level idx+2 ids.
+					_childXml += genObjectXml(kid, 1000 + idx * 100 + kidx)
+					const ko = kid.options || {}
+					const kx = getSmartParseNumber(ko.x ?? 0, 'X', slide._presLayout)
+					const ky = getSmartParseNumber(ko.y ?? 0, 'Y', slide._presLayout)
+					const kw = getSmartParseNumber(ko.w ?? 0, 'X', slide._presLayout)
+					const kh = getSmartParseNumber(ko.h ?? 0, 'Y', slide._presLayout)
+					if (kx < _gMinX) _gMinX = kx
+					if (ky < _gMinY) _gMinY = ky
+					if (kx + kw > _gMaxX) _gMaxX = kx + kw
+					if (ky + kh > _gMaxY) _gMaxY = ky + kh
+				})
+				const _gx = Math.round(_gMinX); const _gy = Math.round(_gMinY)
+				const _gcx = Math.round(_gMaxX - _gMinX); const _gcy = Math.round(_gMaxY - _gMinY)
+				strSlideXml += `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${idx + 2}" name="${slideItemObj.options.objectName || ''}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>`
+				strSlideXml += `<p:grpSpPr><a:xfrm><a:off x="${_gx}" y="${_gy}"/><a:ext cx="${_gcx}" cy="${_gcy}"/><a:chOff x="${_gx}" y="${_gy}"/><a:chExt cx="${_gcx}" cy="${_gcy}"/></a:xfrm></p:grpSpPr>`
+				strSlideXml += _childXml
+				strSlideXml += '</p:grpSp>'
+				break
+			}
+
 			default:
 				strSlideXml += ''
 				break
 		}
-	})
+		return strSlideXml
+	}
+	slide._slideObjects.forEach((slideItemObj: ISlideObject, idx: number) => { strSlideXml += genObjectXml(slideItemObj, idx) })
 
 	// STEP 4: Add slide numbers (if any) last
 	if (slide._slideNumberProps) {

@@ -181,6 +181,28 @@ export function createGlowElement (options: TextGlowProps, defaults: TextGlowPro
 }
 
 /**
+ * Build an `<a:gradFill>` element from a gradient spec.
+ * - `stops[].color` must be a bare 6-hex string (no '#')
+ * - `angle` is the CSS gradient angle (0=up, clockwise); converted to OOXML
+ *   (`<a:lin>` 0=east, clockwise, 60000ths of a degree). Ignored for radial.
+ * @param {object} g gradient spec
+ * @returns {string} `<a:gradFill>` XML
+ */
+function genXmlGradientFill (g: { angle?: number, type?: string, stops: Array<{ color: string, position: number, alpha?: number }> }): string {
+	const gsItems = g.stops.map(s => {
+		const pos = Math.round(Math.max(0, Math.min(1, s.position)) * 100000)
+		const alphaXml = typeof s.alpha === 'number' && s.alpha < 1 ? `<a:alpha val="${Math.round(s.alpha * 100000)}"/>` : ''
+		return `<a:gs pos="${pos}"><a:srgbClr val="${s.color}">${alphaXml}</a:srgbClr></a:gs>`
+	}).join('')
+	if (g.type === 'radial') {
+		// All-50% fillToRect = gradient converges to shape center (CSS radial-gradient(circle,…)).
+		return `<a:gradFill rotWithShape="1"><a:gsLst>${gsItems}</a:gsLst><a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path></a:gradFill>`
+	}
+	const ooxml = (((g.angle ?? 180) - 90) % 360 + 360) % 360
+	return `<a:gradFill rotWithShape="1"><a:gsLst>${gsItems}</a:gsLst><a:lin ang="${Math.round(ooxml * 60000)}" scaled="0"/></a:gradFill>`
+}
+
+/**
  * Create color selection
  * @param {Color | ShapeFillProps | ShapeLineProps} props fill props
  * @returns XML string
@@ -190,6 +212,7 @@ export function genXmlColorSelection (props: Color | ShapeFillProps | ShapeLineP
 	let colorVal = ''
 	let internalElements = ''
 	let outText = ''
+	let gradientSpec: ShapeFillProps['gradient']
 
 	if (props) {
 		if (typeof props === 'string') colorVal = props
@@ -198,11 +221,15 @@ export function genXmlColorSelection (props: Color | ShapeFillProps | ShapeLineP
 			if (props.color) colorVal = props.color
 			if (props.alpha) internalElements += `<a:alpha val="${Math.round((100 - props.alpha) * 1000)}"/>` // DEPRECATED: @deprecated v3.3.0
 			if (props.transparency) internalElements += `<a:alpha val="${Math.round((100 - props.transparency) * 1000)}"/>`
+			gradientSpec = props.gradient
 		}
 
 		switch (fillType) {
 			case 'solid':
 				outText += `<a:solidFill>${createColorElement(colorVal, internalElements)}</a:solidFill>`
+				break
+			case 'gradient':
+				outText += gradientSpec ? genXmlGradientFill(gradientSpec) : ''
 				break
 			default: // @note need a statement as having only "break" is removed by rollup, then tiggers "no-default" js-linter
 				outText += ''
